@@ -1,4 +1,4 @@
-# RionAgent — 설계 문서
+# OchestraForRion — 설계 문서
 
 > **궁극적 목표: 실제로 수익을 내는 AI 트레이딩 시스템**
 
@@ -6,7 +6,9 @@
 
 ## 프로젝트 개요
 
-**RionAgent**는 기존 [AlgoTradingBot (RionFX)](https://github.com/rubayi/AlgoTradingBot)의 AI 의사결정 레이어를 멀티에이전트 구조로 고도화하는 독립 프로젝트입니다.
+**OchestraForRion**은 기존 [AlgoTradingBot (RionFX)](https://github.com/rubayi/AlgoTradingBot)의 AI 의사결정 레이어를 멀티에이전트 구조로 고도화하는 독립 프로젝트입니다.
+
+- GitHub: https://github.com/rubayi/OchestraForRion
 
 - 기존 봇: 패턴 감지 + Gemini 1번 호출로 모든 판단
 - 이 프로젝트: 전문화된 AI 에이전트들의 파이프라인 → 판단 정확도 향상
@@ -75,6 +77,41 @@ Agent 4: 거래 성과 분석
 - **역할**: SL/TP 최적화, 포지션 사이즈 계산
 - **출력**: `{"sl_pips": N, "tp_pips": N, "lot_size": N, "rr_ratio": N}`
 - **참고**: 최근 3거래 손실 시 자동으로 보수적 모드
+
+#### Agent 5: 개발자 에이전트 (Developer Agent) ← 최종 목표
+- **모델**: Claude Opus 4.6 (코드 수정은 정확성이 최우선)
+- **실행 주기**: Agent 4 리포트 생성 후 자동 트리거
+- **입력**: Agent 4 분석 리포트 + AlgoTradingBot 소스코드 (rion_watcher.py, params.json)
+- **역할**: 성과 분석 기반으로 실제 코드/파라미터를 수정하는 **자율 개발자**
+- **동작 흐름**:
+  ```
+  Agent 4: "ma_box 전략 -32 pips, 비활성화 권장"
+      ↓
+  Developer Agent:
+    1. rion_watcher.py + params.json 읽음
+    2. 문제 원인 분석 (코드 레벨)
+    3. 수정안 생성 (diff 형태)
+    4. Telegram으로 사용자에게 전송:
+       "이렇게 수정할까요? ✅승인 / ❌거절"
+      ↓
+  사용자 ✅ 클릭
+      ↓
+    5. 실제 코드 수정 적용
+    6. git commit & push
+    7. 봇 재시작
+    8. 결과 모니터링
+  ```
+- **할 수 있는 것들**:
+  - `params.json` 파라미터 자동 최적화
+  - 손실 패턴 전략 비활성화/수정
+  - 새로운 패턴 감지 조건 추가
+  - SL/TP 로직 개선
+  - AI 프롬프트(RionFX_Persona_AI.md) 개선
+- **안전장치**:
+  - 모든 변경은 **사용자 Telegram 승인 필수**
+  - 자동 git backup (변경 전 항상 커밋)
+  - 라이브 계좌에는 절대 미적용 (Demo only)
+  - 변경 후 24시간 성과 모니터링 후 보고
 
 #### Agent 4: 성과 분석가 (Performance Analyst) ← 최우선 구현
 - **모델**: Claude Haiku 4.5
@@ -159,6 +196,17 @@ Agent 4: 거래 성과 분석
 - [ ] Agent 4 → params_suggestion.json → 자동 적용 (승인 후)
 - [ ] 월간 성과 리포트 자동화
 - [ ] 손실 패턴 자동 감지 + 전략 조정
+
+### Phase 6: Developer Agent 구현 ← 최종 목표
+> **"AI가 직접 코드를 고쳐서 수익을 개선하는 자율 개발자"**
+
+- [ ] `agents/developer_agent.py` — Opus 기반 코드 수정 에이전트
+- [ ] Telegram 승인 인터페이스 (✅/❌ 버튼)
+- [ ] git auto-backup + apply 파이프라인
+- [ ] 봇 자동 재시작 + 성과 모니터링
+- [ ] params.json 자동 최적화 (승인 기반)
+- [ ] RionFX_Persona_AI.md 프롬프트 자동 개선
+- [ ] **Demo → 실계좌 전환 기준 수립** (승률 75%+ 유지 2주)
 
 ---
 
