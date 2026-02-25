@@ -79,39 +79,61 @@ Agent 4: 거래 성과 분석
 - **참고**: 최근 3거래 손실 시 자동으로 보수적 모드
 
 #### Agent 5: 개발자 에이전트 (Developer Agent) ← 최종 목표
+
+> **핵심 원칙: 테스트가 승인을 대체한다**
+> 코드 구조 변경은 테스트 통과 시 자율 적용, 트레이딩 로직 변경만 사람이 승인
+
 - **모델**: Claude Opus 4.6 (코드 수정은 정확성이 최우선)
 - **실행 주기**: Agent 4 리포트 생성 후 자동 트리거
 - **입력**: Agent 4 분석 리포트 + AlgoTradingBot 소스코드 (rion_watcher.py, params.json)
 - **역할**: 성과 분석 기반으로 실제 코드/파라미터를 수정하는 **자율 개발자**
-- **동작 흐름**:
-  ```
-  Agent 4: "ma_box 전략 -32 pips, 비활성화 권장"
-      ↓
-  Developer Agent:
-    1. rion_watcher.py + params.json 읽음
-    2. 문제 원인 분석 (코드 레벨)
-    3. 수정안 생성 (diff 형태)
-    4. Telegram으로 사용자에게 전송:
-       "이렇게 수정할까요? ✅승인 / ❌거절"
-      ↓
-  사용자 ✅ 클릭
-      ↓
-    5. 실제 코드 수정 적용
-    6. git commit & push
-    7. 봇 재시작
-    8. 결과 모니터링
-  ```
-- **할 수 있는 것들**:
-  - `params.json` 파라미터 자동 최적화
-  - 손실 패턴 전략 비활성화/수정
-  - 새로운 패턴 감지 조건 추가
-  - SL/TP 로직 개선
-  - AI 프롬프트(RionFX_Persona_AI.md) 개선
+
+##### 변경 유형별 처리 방식
+
+| 변경 유형 | 예시 | 처리 방식 |
+|-----------|------|-----------|
+| 코드 버그 수정 | 기본값 불일치, 변수 스코프 오류 | 테스트 통과 → **자동 적용** |
+| 리팩토링 | 함수 분리, 변수명 정리 | 테스트 통과 → **자동 적용** |
+| params.json 튜닝 | stop_loss_pips 18→15 | **Telegram 승인 필수** |
+| 전략 활성/비활성 | ma_box_enabled false | **Telegram 승인 필수** |
+| 진입 조건 변경 | 패턴 감지 로직 수정 | **Telegram 승인 필수** |
+| AI 프롬프트 수정 | RionFX_Persona_AI.md | **Telegram 승인 필수** |
+
+##### 동작 흐름
+
+```
+Agent 4: "ma_box 전략 -32 pips, 비활성화 권장"
+    ↓
+Developer Agent:
+  1. rion_watcher.py + params.json 읽음
+  2. 문제 원인 분석 (코드 레벨)
+  3. 변경 유형 분류 (자율 vs 승인)
+
+  ── 자율 처리 (버그/리팩토링) ──────────────────
+  4a. 수정안 생성
+  5a. 테스트 코드 작성 + 실행
+  6a. 전부 통과 → git commit & push (자동)
+  7a. Telegram 보고: "✅ 자율 적용 완료 — 버그 수정 3건, 75 tests pass"
+
+  ── 승인 필요 (트레이딩 로직) ──────────────────
+  4b. 수정안 생성 (diff 형태)
+  5b. Telegram 전송:
+      "ma_box_enabled: True → False
+       예상 효과: -32.7pips 손실 패턴 차단
+       ✅승인 / ❌거절"
+  6b. 사용자 ✅ → 적용 → git commit & push
+  7b. 봇 재시작 → 24시간 모니터링
+```
+
+- **자율 적용 조건** (둘 다 충족 시):
+  - 테스트 전부 통과 (`pytest tests/ -v`)
+  - 트레이딩 로직 (진입/청산/SL/TP) 미변경
+
 - **안전장치**:
-  - 모든 변경은 **사용자 Telegram 승인 필수**
-  - 자동 git backup (변경 전 항상 커밋)
+  - 자동 git backup (변경 전 항상 브랜치 생성)
   - 라이브 계좌에는 절대 미적용 (Demo only)
-  - 변경 후 24시간 성과 모니터링 후 보고
+  - 변경 후 24시간 성과 모니터링
+  - 테스트 실패 시 전량 롤백, Telegram 알림
 
 #### Agent 4: 성과 분석가 (Performance Analyst) ← 최우선 구현
 - **모델**: Claude Haiku 4.5
@@ -198,14 +220,31 @@ Agent 4: 거래 성과 분석
 - [ ] 손실 패턴 자동 감지 + 전략 조정
 
 ### Phase 6: Developer Agent 구현 ← 최종 목표
-> **"AI가 직접 코드를 고쳐서 수익을 개선하는 자율 개발자"**
+> **"테스트가 승인을 대체한다 — 구조 변경은 자율, 트레이딩 로직만 승인"**
 
-- [ ] `agents/developer_agent.py` — Opus 기반 코드 수정 에이전트
-- [ ] Telegram 승인 인터페이스 (✅/❌ 버튼)
-- [ ] git auto-backup + apply 파이프라인
-- [ ] 봇 자동 재시작 + 성과 모니터링
+#### 6-1. 테스트 인프라 (자율화의 전제조건)
+- [ ] `tests/` 디렉토리 구축 — 핵심 함수 단위 테스트
+- [ ] `tests/test_patterns.py` — 패턴 감지 로직 검증
+- [ ] `tests/test_params.py` — params.json 유효성 검증
+- [ ] `tests/test_risk.py` — SL/TP 계산 검증
+- [ ] GitHub Actions CI — push 시 자동 테스트 실행
+
+#### 6-2. 자율 처리 파이프라인 (Odasaga CTO 방식)
+- [ ] `agents/developer_agent.py` — Opus 기반 코드 분석 + 수정
+- [ ] 변경 유형 분류기 — 자율 vs 승인 자동 판단
+- [ ] `pytest` 자동 실행 + 결과 파싱
+- [ ] 테스트 통과 시 git commit & push 자동화
+- [ ] Telegram 완료 보고: "✅ 자율 적용 — 버그 3건, N tests pass"
+
+#### 6-3. 승인 파이프라인 (트레이딩 로직 전용)
+- [ ] Telegram 승인 인터페이스 (✅/❌ 인라인 버튼)
+- [ ] diff 형태 수정안 + 예상 효과 전송
+- [ ] git auto-backup 브랜치 생성 후 적용
+- [ ] 봇 자동 재시작 + 24시간 성과 모니터링
+
+#### 6-4. 자율화 확장
 - [ ] params.json 자동 최적화 (승인 기반)
-- [ ] RionFX_Persona_AI.md 프롬프트 자동 개선
+- [ ] RionFX_Persona_AI.md 프롬프트 자동 개선 (승인 기반)
 - [ ] **Demo → 실계좌 전환 기준 수립** (승률 75%+ 유지 2주)
 
 ---
