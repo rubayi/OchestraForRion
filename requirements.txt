@@ -1,0 +1,4 @@
+anthropic>=0.50.0
+python-telegram-bot>=20.0
+python-dotenv>=1.0.0
+schedule>=1.2.0
