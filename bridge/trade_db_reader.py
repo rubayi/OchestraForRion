@@ -35,6 +35,8 @@ class PatternStats:
             return "🔴"
         if self.recommendation == "review":
             return "⚠️"
+        if self.recommendation == "context":
+            return "🔍"  # 방어적 청산 — 진입 품질 지표
         return "✅"
 
 
@@ -119,7 +121,10 @@ class TradeDBReader:
                 avg_pips = r["avg_pips"] or 0.0
 
                 # 권장사항 결정 로직
-                if avg_pips < -10 and wr < 40:
+                # manual: 대표님 방어적 긴급 종료 — 패턴 전략이 아니므로 disable/review 금지
+                if r["pattern_type"] == "manual":
+                    rec = "context"  # 진입 품질 문제를 보여주는 지표
+                elif avg_pips < -10 and wr < 40:
                     rec = "disable"
                 elif avg_pips < 0 or wr < 50:
                     rec = "review"

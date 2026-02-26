@@ -5,9 +5,11 @@ performance_analyst.py — Agent 4: 성과 분석가
 모델: claude-haiku-4-5-20251001 (빠름, 저렴 ~$0.001/회)
 """
 import os
+import json
 import logging
 import requests
 import anthropic
+from pathlib import Path
 
 from bridge.trade_db_reader import TradeDBReader, TradeReport, PatternStats
 
@@ -15,30 +17,87 @@ logger = logging.getLogger(__name__)
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
+# AlgoTradingBot params.json 경로 (환경변수 또는 상대경로)
+PARAMS_JSON_PATH = os.environ.get(
+    "ALGOTRADINGBOT_PARAMS",
+    str(Path(__file__).parent.parent.parent / "AlgoTradingBot" / "params.json"),
+)
+
 SYSTEM_PROMPT = """당신은 OchestraForRion 프로젝트의 Agent 4 (성과 분석가)입니다.
 RionFX GBPAUD 트레이딩 봇의 거래 통계를 분석하여, 대표님(Ruba)께 Telegram 일일 보고서를 작성합니다.
 
-보고서 작성 규칙:
+━━━ 반드시 숙지할 컨텍스트 ━━━
+
+[MANUAL 청산의 진짜 의미]
+exit_reason="MANUAL"은 대표님이 손실이 심각해질 때 직접 포지션을 긴급 종료한 것입니다.
+MANUAL 청산은 손실의 "원인"이 아니라 손실을 최소화하기 위한 "방어 행동"입니다.
+MANUAL 비중이 높다는 것은 봇의 진입 조건이나 청산 로직에 문제가 있다는 신호입니다.
+→ MANUAL 청산 자체를 문제로 지적하거나 경고하지 마세요. 진입 품질 개선에 집중하세요.
+
+[LOG_SYNC 청산의 의미]
+exit_reason="LOG_SYNC"는 봇 재시작 시 기존 포지션을 DB에 자동 동기화하는 정상 동작입니다.
+→ LOG_SYNC를 문제로 언급하지 마세요.
+
+[현재 비활성화된 전략]
+통계 데이터에 "이미 비활성화됨" 표시가 있는 패턴은 현재 params.json에서 꺼져 있습니다.
+→ 이미 비활성화된 전략에 대해 "비활성화 권장" 같은 중복 권고를 하지 마세요.
+
+[전일 분석과의 차이]
+이전 보고 내용이 제공되면, 같은 말을 반복하지 말고 달라진 점과 새로운 인사이트에 집중하세요.
+
+━━━ 보고서 작성 규칙 ━━━
+
 1. 첫 줄: "📊 [AlohaCTO 일일 성과 보고] YYYY-MM-DD"
 2. 전체 요약: 청산 건수, 승률, 총 손익
-3. 패턴별 분석 (패턴마다 한 섹션):
+3. 패턴별 분석 (현재 활성화된 패턴만):
    이모지 + 패턴명 + 건수/승률/평균pips + 한 줄 평가
    - ✅ 계속 유지 / ⚠️ 개선 권장 / 🔴 즉시 비활성화 권장
-4. 청산 사유 분석 (MANUAL 비중 높으면 반드시 경고)
-5. 연속 손실 3회 이상이면 ⚠️ 경고 및 대응 제안
-6. 💡 구체적 개선 제안 1~3개 (params.json 수정 예시 포함)
+4. 손실 거래 근본 원인 분석:
+   - 손실이 발생한 패턴의 진입 조건, 시간대, 시장 상황에 집중
+   - 청산 방법(MANUAL/SL)이 아닌 "왜 진입했나"에 집중
+5. 연속 손실 3회 이상이면 ⚠️ 경고 및 진입 조건 개선 제안
+6. 💡 구체적 개선 제안 1~3개 (이미 적용된 것은 제외, params.json 수정 예시 포함)
 7. 마지막: 종합 평가 한 문장 + "대표님의 현명한 판단을 기다립니다."
 
 언어 및 형식:
 - 반드시 존댓말(격식체)로 작성하세요. 대표님께 보고하는 형식입니다.
-- 이모지를 적극 활용하되 내용은 빠짐없이 작성하세요.
 - 숫자는 소수점 1자리로 통일하세요.
-- 내용을 임의로 생략하거나 "..." 으로 줄이지 마세요.
 - 한국어로만 작성하세요."""
 
 
+def _load_params() -> dict:
+    """AlgoTradingBot params.json 로드 (실패 시 빈 dict)"""
+    try:
+        with open(PARAMS_JSON_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"[Agent4] params.json 로드 실패: {e}")
+        return {}
+
+
+def _load_prev_report_summary() -> str:
+    """last_report.json에서 전날 분석 요약 로드"""
+    try:
+        state_path = Path(__file__).parent.parent / "last_report.json"
+        if state_path.exists():
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            return data.get("analysis_summary", "")
+    except Exception:
+        pass
+    return ""
+
+
 def _build_stats_summary(report: TradeReport) -> str:
-    """TradeReport → AI 입력용 통계 요약 텍스트"""
+    """TradeReport → AI 입력용 통계 요약 텍스트 (params.json + 전날 분석 포함)"""
+    params = _load_params()
+
+    # 비활성화된 전략 목록
+    disabled = []
+    if not params.get("ma_box_enabled", True):
+        disabled.append("ma_box")
+    if not params.get("triple_top_enabled", True):
+        disabled.append("triple_top")
+
     lines = [
         f"분석 기간: 최근 {report.period_days}일 ({report.generated_at} 기준)",
         f"전체 거래: {report.total_trades}건 | 청산: {report.total_closed}건",
@@ -46,25 +105,40 @@ def _build_stats_summary(report: TradeReport) -> str:
         f"총 수익: {report.total_profit_pips:+.1f} pips",
         f"최근 연속 손실: {report.recent_consecutive_losses}회",
         "",
+        "[현재 params.json 주요 설정]",
+        f"  stop_loss_pips={params.get('stop_loss_pips', '?')} | "
+        f"sl_buffer_pips={params.get('sl_buffer_pips', '?')} | "
+        f"trailing_activation_pips={params.get('trailing_activation_pips', '?')}",
+        f"  breakeven_activation_pips={params.get('breakeven_activation_pips', '?')} | "
+        f"partial_close_trigger_pips={params.get('partial_close_trigger_pips', '?')}",
+        f"  현재 비활성화된 전략: {', '.join(disabled) if disabled else '없음'}",
+        "",
         "패턴별 상세 통계:",
     ]
 
     for p in report.pattern_stats:
+        disabled_note = " [현재 비활성화됨]" if p.pattern in disabled else ""
         lines.append(
-            f"  [{p.pattern}] {p.total}건 | "
+            f"  [{p.pattern}]{disabled_note} {p.total}건 | "
             f"승률={p.win_rate}% | "
             f"평균={p.avg_profit_pips:+.1f}pips | "
             f"이길때={p.avg_win_pips:+.1f} / 질때={p.avg_loss_pips:+.1f} | "
-            f"RR={p.avg_rr} | "
-            f"권장={p.recommendation}"
+            f"RR={p.avg_rr}"
         )
 
     if report.exit_reason_counts:
         lines.append("")
-        lines.append("청산 사유:")
+        lines.append("청산 사유 (참고: MANUAL=대표님 방어적 긴급종료, LOG_SYNC=봇재시작 정상동기화):")
         for reason, cnt in report.exit_reason_counts.items():
             pct = round(cnt / report.total_closed * 100, 1) if report.total_closed > 0 else 0
             lines.append(f"  {reason}: {cnt}건 ({pct}%)")
+
+    # 전날 분석 요약 추가
+    prev_summary = _load_prev_report_summary()
+    if prev_summary:
+        lines.append("")
+        lines.append("[전일 보고 요약 — 중복 언급 금지, 변화된 점에만 집중]")
+        lines.append(prev_summary)
 
     return "\n".join(lines)
 
@@ -105,6 +179,19 @@ def analyze(report: TradeReport) -> str:
         f"[Agent4] 분석 완료 — 입력 {response.usage.input_tokens}토큰, "
         f"출력 {response.usage.output_tokens}토큰"
     )
+
+    # 분석 요약 저장 (다음날 중복 방지용) — 첫 500자만
+    try:
+        state_path = Path(__file__).parent.parent / "last_report.json"
+        existing = {}
+        if state_path.exists():
+            existing = json.loads(state_path.read_text(encoding="utf-8"))
+        existing["analysis_summary"] = result[:500]
+        existing["analyzed_at"] = report.generated_at
+        state_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[Agent4] 분석 요약 저장 실패: {e}")
+
     return result
 
 
