@@ -128,6 +128,7 @@ def send_telegram(message: str) -> bool:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     # Telegram 메시지 최대 4096자 — 초과 시 분할 전송
     chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
+    last_message_id = None
     try:
         for chunk in chunks:
             resp = requests.post(
@@ -138,11 +139,72 @@ def send_telegram(message: str) -> bool:
             if not resp.ok:
                 logger.error(f"[Agent4] Telegram 전송 실패: {resp.status_code} {resp.text}")
                 return False
+            last_message_id = resp.json().get("result", {}).get("message_id")
         logger.info(f"[Agent4] Telegram 전송 성공 ({len(chunks)}개 메시지)")
+
+        # 마지막 리포트 message_id 저장 → control_bot이 Reply 감지에 사용
+        if last_message_id:
+            import json as _json
+            from datetime import datetime as _dt
+            _state_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "last_report.json")
+            with open(_state_path, "w", encoding="utf-8") as _f:
+                _json.dump({"message_id": last_message_id, "sent_at": _dt.now().isoformat()}, _f)
         return True
     except requests.RequestException as e:
         logger.error(f"[Agent4] Telegram 요청 오류: {e}")
         return False
+
+
+FEEDBACK_SYSTEM_PROMPT = """당신은 OchestraForRion 프로젝트의 Agent 4 (성과 분석가)입니다.
+대표님(Ruba)께서 방금 받으신 성과 보고서에 피드백을 주셨습니다.
+거래 통계와 피드백을 참고하여 대표님의 질문/의견에 성실하게 답변해주세요.
+
+응답 규칙:
+- 반드시 존댓말(격식체)로 작성하세요.
+- 피드백의 핵심을 파악하고 구체적으로 답변하세요.
+- 필요하면 통계 수치를 직접 인용하세요.
+- 한국어로만 작성하세요.
+- 답변은 500자 이내로 간결하게 작성하세요."""
+
+
+def analyze_feedback(report: TradeReport, feedback_text: str) -> str:
+    """
+    보고서에 대한 대표님 피드백 → Haiku 응답 생성
+
+    Args:
+        report: 현재 거래 통계 (컨텍스트용)
+        feedback_text: 대표님이 보낸 피드백 텍스트
+
+    Returns:
+        응답 문자열 (Telegram 전송용)
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise EnvironmentError("ANTHROPIC_API_KEY 환경변수가 설정되지 않았습니다.")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    stats_text = _build_stats_summary(report)
+
+    logger.info(f"[Agent4] 피드백 응답 요청: {feedback_text[:50]}...")
+
+    response = client.messages.create(
+        model=HAIKU_MODEL,
+        max_tokens=800,
+        system=FEEDBACK_SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"[현재 30일 거래 통계]\n{stats_text}\n\n"
+                    f"[대표님 피드백]\n{feedback_text}"
+                ),
+            }
+        ],
+    )
+
+    result = response.content[0].text
+    logger.info(f"[Agent4] 피드백 응답 완료 — {response.usage.output_tokens}토큰")
+    return f"💬 AlohaCTO:\n\n{result}"
 
 
 def run(db_path: str, days: int = 30) -> bool:
