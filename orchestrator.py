@@ -42,8 +42,17 @@ ALGOTRADINGBOT_DIR = os.environ.get(
     r"C:\Users\rubay\Documents\projects\AlgoTradingBot",
 )
 DB_PATH          = os.path.join(ALGOTRADINGBOT_DIR, "data", "trades.db")
+PARAMS_PATH      = os.path.join(ALGOTRADINGBOT_DIR, "params.json")
+JSON_PATH        = os.path.join(ALGOTRADINGBOT_DIR, "rion_data", "rion_data_now.json")
+SIGNAL_OUT_PATH  = os.path.join(os.path.dirname(__file__), "signal.json")
 CONTROL_BOT_PATH = os.path.join(ALGOTRADINGBOT_DIR, "rion_control_bot.py")
 LAST_REPORT_FILE = os.path.join(os.path.dirname(__file__), "last_report.json")
+
+# ── 손실 모니터 설정 ───────────────────────────────────────────────────────────
+LOSS_WARN_PIPS        = float(os.environ.get("LOSS_WARN_PIPS",       "-5.0"))  # 1차 경고
+LOSS_URGENT_PIPS      = float(os.environ.get("LOSS_URGENT_PIPS",    "-10.0"))  # 긴급 경고
+LOSS_ESCALATION_PIPS  = float(os.environ.get("LOSS_ESCALATION_PIPS",  "3.0"))  # 60초 내 악화 기준
+LOSS_DATA_MAX_AGE_SEC = 300  # rion_data_now.json 최대 허용 오래됨 (5분)
 
 # ── Telegram 설정 ─────────────────────────────────────────────────────────────
 BOT_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -93,6 +102,113 @@ def _load_last_report() -> dict:
         return {}
 
 
+# ── 손실 확대 모니터 ──────────────────────────────────────────────────────────
+
+_loss_pnl_history: dict = {}   # {ticket: [pnl, pnl, ...]}  최근 2개만 유지
+_loss_alert_sent:  dict = {}   # {ticket: {"warn": bool, "urgent": bool}}
+
+
+def _check_loss_escalation() -> None:
+    """rion_data_now.json 포지션 PnL → 손실 확대 감지 → Telegram 알림"""
+    if not os.path.exists(JSON_PATH):
+        return
+
+    # 데이터 신선도 확인
+    age = time.time() - os.path.getmtime(JSON_PATH)
+    if age > LOSS_DATA_MAX_AGE_SEC:
+        return  # 5분 이상 오래된 데이터는 무시
+
+    try:
+        with open(JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+
+    positions = data.get("positions", [])
+
+    # 포지션 없으면 히스토리·알림 상태 초기화
+    if not positions:
+        _loss_pnl_history.clear()
+        _loss_alert_sent.clear()
+        return
+
+    active_tickets = set()
+
+    for pos in positions:
+        ticket  = str(pos.get("ticket", ""))
+        pnl     = float(pos.get("pnl_pips", 0))
+        entry   = pos.get("entry", 0)
+        current = pos.get("current", 0)
+
+        if not ticket:
+            continue
+
+        active_tickets.add(ticket)
+
+        # 히스토리 초기화
+        if ticket not in _loss_pnl_history:
+            _loss_pnl_history[ticket] = []
+            _loss_alert_sent[ticket]  = {"warn": False, "urgent": False}
+
+        history = _loss_pnl_history[ticket]
+        prev_pnl = history[-1] if history else None
+        history.append(pnl)
+        if len(history) > 3:
+            history.pop(0)
+
+        state  = _loss_alert_sent[ticket]
+        alerts = []
+
+        # ① 1차 경고: 처음 LOSS_WARN_PIPS 돌파
+        if pnl <= LOSS_WARN_PIPS and not state["warn"]:
+            alerts.append(f"⚠️ 손실 {pnl:+.1f} pips")
+            state["warn"] = True
+
+        # ② 긴급 경고: 처음 LOSS_URGENT_PIPS 돌파
+        if pnl <= LOSS_URGENT_PIPS and not state["urgent"]:
+            alerts.append(f"🚨 손실 {pnl:+.1f} pips — 즉시 확인 필요")
+            state["urgent"] = True
+
+        # ③ 손실 급확대: 60초 내 LOSS_ESCALATION_PIPS 이상 악화
+        if prev_pnl is not None and pnl < 0:
+            deterioration = prev_pnl - pnl  # 양수 = 더 악화됨
+            if deterioration >= LOSS_ESCALATION_PIPS:
+                alerts.append(
+                    f"📉 급확대: {prev_pnl:+.1f} → {pnl:+.1f} pips "
+                    f"({deterioration:.1f}pips 악화 / 60초)"
+                )
+
+        if alerts:
+            symbol = data.get("symbol", "GBPAUD")
+            msg = (
+                f"{'🚨' if pnl <= LOSS_URGENT_PIPS else '⚠️'} [손실 알림] {symbol} SELL\n"
+                f"티켓: {ticket}\n"
+                f"진입가: {entry:.5f} | 현재가: {current:.5f}\n"
+                f"현재 손익: {pnl:+.1f} pips\n\n"
+                + "\n".join(alerts)
+            )
+            logger.warning(f"[LossMonitor] 알림 발송 — 티켓 {ticket}, {pnl:+.1f} pips")
+            _tg_send(msg)
+
+    # 청산된 포지션 상태 정리
+    for closed_ticket in list(_loss_pnl_history.keys()):
+        if closed_ticket not in active_tickets:
+            _loss_pnl_history.pop(closed_ticket, None)
+            _loss_alert_sent.pop(closed_ticket, None)
+
+
+def run_loss_monitor() -> None:
+    """손실 확대 모니터 스레드 — 60초마다 포지션 PnL 감시"""
+    logger.info(
+        f"[LossMonitor] 시작 — "
+        f"경고={LOSS_WARN_PIPS}pips / 긴급={LOSS_URGENT_PIPS}pips / "
+        f"급확대={LOSS_ESCALATION_PIPS}pips/60초"
+    )
+    while True:
+        _check_loss_escalation()
+        time.sleep(60)
+
+
 # ── Agent 4 실행 ──────────────────────────────────────────────────────────────
 
 def run_agent4(days: int = 30) -> None:
@@ -111,6 +227,118 @@ def run_agent4(days: int = 30) -> None:
         logger.error(f"[Orchestrator] DB 파일 없음: {e}")
     except Exception as e:
         logger.error(f"[Orchestrator] Agent 4 오류: {e}", exc_info=True)
+    logger.info("=" * 50)
+
+
+# ── Agent 1→2→3 파이프라인 실행 ──────────────────────────────────────────────
+
+def run_signal_pipeline() -> None:
+    """Agent 1 (Haiku 필터) → Agent 2 (Opus 결정) → Agent 3 (Haiku 리스크) 파이프라인 실행
+    결과를 Telegram으로 전송."""
+    import json as _json
+    from pathlib import Path
+
+    logger.info("=" * 50)
+    logger.info("[Orchestrator] 시그널 파이프라인 실행 시작")
+
+    # rion_data_now.json 존재 여부 확인
+    if not os.path.exists(JSON_PATH):
+        msg = f"❌ rion_data_now.json 없음\n경로: {JSON_PATH}\n\n봇이 실행 중인지 확인하세요."
+        logger.error(f"[Orchestrator] {msg}")
+        _tg_send(msg)
+        return
+
+    # run_signal.py 경로
+    run_signal_py = os.path.join(os.path.dirname(__file__), "run_signal.py")
+    if not os.path.exists(run_signal_py):
+        _tg_send(f"❌ run_signal.py를 찾을 수 없습니다:\n{run_signal_py}")
+        return
+
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, run_signal_py,
+                "--input",  JSON_PATH,
+                "--output", SIGNAL_OUT_PATH,
+                "--db",     DB_PATH,
+                "--params", PARAMS_PATH,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=os.path.dirname(__file__),
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        _tg_send("⏱️ 시그널 파이프라인 타임아웃 (120초)")
+        logger.error("[Orchestrator] 시그널 파이프라인 타임아웃")
+        return
+    except Exception as e:
+        _tg_send(f"❌ 파이프라인 실행 오류: {e}")
+        logger.error(f"[Orchestrator] 파이프라인 오류: {e}")
+        return
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "알 수 없는 오류")[:500]
+        _tg_send(f"❌ 파이프라인 오류 (코드 {result.returncode})\n{err}")
+        logger.error(f"[Orchestrator] 파이프라인 종료코드 {result.returncode}: {err}")
+        return
+
+    # signal.json 읽기
+    try:
+        with open(SIGNAL_OUT_PATH, "r", encoding="utf-8") as f:
+            sig = _json.load(f)
+    except Exception as e:
+        _tg_send(f"❌ signal.json 읽기 실패: {e}")
+        logger.error(f"[Orchestrator] signal.json 읽기 실패: {e}")
+        return
+
+    # Telegram 보고서 작성
+    a1 = sig.get("agent1") or {}
+    a2 = sig.get("agent2") or {}
+    a3 = sig.get("agent3") or {}
+    final = sig.get("final_decision", "SKIP")
+    ts = sig.get("timestamp", "")
+
+    if final == "ENTER":
+        icon = "🟢"
+    else:
+        icon = "🔴"
+
+    lines = [
+        f"{icon} *RionAgent 시그널* — {ts}",
+        "",
+        f"*Agent 1* (필터): pass={a1.get('pass')} | strength={a1.get('strength')}/100",
+        f"  {a1.get('context', '')}",
+    ]
+
+    if a2:
+        lines += [
+            "",
+            f"*Agent 2* (결정): {a2.get('decision')} | confidence={a2.get('confidence')}%",
+            f"  {a2.get('reason', '')}",
+        ]
+    else:
+        lines.append("\nAgent 2: 미호출 (Agent 1 필터 미통과)")
+
+    if a3:
+        mode_icon = "⚠️ 보수적" if a3.get("mode") == "conservative" else "✅ 정상"
+        lines += [
+            "",
+            f"*Agent 3* (리스크): {mode_icon}",
+            f"  SL={a3.get('sl_pips')}p | TP={a3.get('tp_pips')}p | "
+            f"랏={a3.get('lot_size')} | RR={a3.get('rr_ratio')}",
+            f"  {a3.get('reason', '')}",
+        ]
+
+    lines += [
+        "",
+        f"━━━ *최종: {final}* ━━━",
+    ]
+
+    _tg_send("\n".join(lines))
+    logger.info(f"[Orchestrator] 파이프라인 완료 — final_decision={final}")
     logger.info("=" * 50)
 
 
@@ -152,10 +380,11 @@ def _handle_free_text(text: str) -> None:
     try:
         resp = client.messages.create(
             model=HAIKU_MODEL,
-            max_tokens=1000,
+            max_tokens=2000,
             system=(
                 "당신은 AlohaCTO입니다. RionFX GBPAUD 트레이딩봇의 성과 분석을 담당하며 "
-                "대표님(Ruba)의 질문에 존댓말(격식체)로 성실하게 답변합니다."
+                "대표님(Ruba)의 질문에 존댓말(격식체)로 성실하게 답변합니다. "
+                "내용을 임의로 생략하거나 '...'으로 줄이지 마세요."
             ),
             messages=[{
                 "role": "user",
@@ -212,6 +441,7 @@ def _detect_close_intent(text: str):
 
 HELP_TEXT = (
     "📋 RionAgent 명령어\n\n"
+    "/signal    — Agent1→2→3 시그널 파이프라인 즉시 실행\n"
     "/report    — AlohaCTO 성과 분석 즉시 실행\n"
     "/status    — 봇 실행 상태\n"
     "/log       — 최근 로그 30줄\n"
@@ -269,7 +499,11 @@ def run_telegram_daemon() -> None:
                 # ── 명령어 처리 ──────────────────────────────────────────────
                 cmd = text.split("@")[0]  # @봇이름 제거
 
-                if cmd == "/report":
+                if cmd == "/signal":
+                    _tg_send("🔍 시그널 파이프라인 실행 중... (Agent1→2→3, 60초 내외 소요)")
+                    threading.Thread(target=run_signal_pipeline, daemon=True).start()
+
+                elif cmd == "/report":
                     _tg_send("📊 AlohaCTO Agent 4 분석 중... (30초 내외 소요)")
                     threading.Thread(target=run_agent4, daemon=True).start()
 
@@ -380,6 +614,9 @@ def main() -> None:
             time.sleep(30)
 
     threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler").start()
+
+    # 손실 확대 모니터 스레드 시작
+    threading.Thread(target=run_loss_monitor, daemon=True, name="loss_monitor").start()
 
     # Telegram 폴링을 메인 스레드에서 실행
     run_telegram_daemon()
