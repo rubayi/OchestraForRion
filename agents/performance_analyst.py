@@ -15,22 +15,26 @@ logger = logging.getLogger(__name__)
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
-SYSTEM_PROMPT = """당신은 RionFX GBPAUD 트레이딩 봇의 전문 성과 분석가입니다.
-거래 통계를 분석해 트레이더에게 Telegram 리포트를 작성합니다.
+SYSTEM_PROMPT = """당신은 OchestraForRion 프로젝트의 Agent 4 (성과 분석가)입니다.
+RionFX GBPAUD 트레이딩 봇의 거래 통계를 분석하여, 대표님(Ruba)께 Telegram 일일 보고서를 작성합니다.
 
-리포트 작성 규칙:
-1. 첫 줄: "📊 [RionAgent 일일 성과 리포트] YYYY-MM-DD"
-2. 패턴별 한 줄씩: 이모지 + 패턴명 + 핵심 지표 + 한 줄 평가
-   - ✅ 계속 사용 / ⚠️ 개선 필요 / 🔴 비활성화 권장
-3. 청산 사유 분석 (MANUAL 비중이 높으면 경고)
-4. 연속 손실이 3회 이상이면 경고
-5. 💡 구체적 params.json 개선안 1~3개
-   - 예시: "bamboo_min_candles 3→5", "stop_loss_pips 18→15"
-6. 마지막 줄: 한 문장 종합 평가
+보고서 작성 규칙:
+1. 첫 줄: "📊 [AlohaCTO 일일 성과 보고] YYYY-MM-DD"
+2. 전체 요약: 청산 건수, 승률, 총 손익
+3. 패턴별 분석 (패턴마다 한 섹션):
+   이모지 + 패턴명 + 건수/승률/평균pips + 한 줄 평가
+   - ✅ 계속 유지 / ⚠️ 개선 권장 / 🔴 즉시 비활성화 권장
+4. 청산 사유 분석 (MANUAL 비중 높으면 반드시 경고)
+5. 연속 손실 3회 이상이면 ⚠️ 경고 및 대응 제안
+6. 💡 구체적 개선 제안 1~3개 (params.json 수정 예시 포함)
+7. 마지막: 종합 평가 한 문장 + "대표님의 현명한 판단을 기다립니다."
 
-출력은 Telegram 메시지 형식 (이모지 사용, 500자 이내로 간결하게).
-숫자는 반드시 소수점 1자리로 통일.
-한국어로만 작성."""
+언어 및 형식:
+- 반드시 존댓말(격식체)로 작성하세요. 대표님께 보고하는 형식입니다.
+- 이모지를 적극 활용하되 내용은 빠짐없이 작성하세요.
+- 숫자는 소수점 1자리로 통일하세요.
+- 내용을 임의로 생략하거나 "..." 으로 줄이지 마세요.
+- 한국어로만 작성하세요."""
 
 
 def _build_stats_summary(report: TradeReport) -> str:
@@ -83,7 +87,7 @@ def analyze(report: TradeReport) -> str:
 
     response = client.messages.create(
         model=HAIKU_MODEL,
-        max_tokens=800,
+        max_tokens=2500,
         system=SYSTEM_PROMPT,
         messages=[
             {
@@ -122,18 +126,20 @@ def send_telegram(message: str) -> bool:
         return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    # Telegram 메시지 최대 4096자 — 초과 시 분할 전송
+    chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
     try:
-        resp = requests.post(
-            url,
-            json={"chat_id": chat_id, "text": message},
-            timeout=15,
-        )
-        if resp.ok:
-            logger.info("[Agent4] Telegram 전송 성공")
-            return True
-        else:
-            logger.error(f"[Agent4] Telegram 전송 실패: {resp.status_code} {resp.text}")
-            return False
+        for chunk in chunks:
+            resp = requests.post(
+                url,
+                json={"chat_id": chat_id, "text": chunk},
+                timeout=15,
+            )
+            if not resp.ok:
+                logger.error(f"[Agent4] Telegram 전송 실패: {resp.status_code} {resp.text}")
+                return False
+        logger.info(f"[Agent4] Telegram 전송 성공 ({len(chunks)}개 메시지)")
+        return True
     except requests.RequestException as e:
         logger.error(f"[Agent4] Telegram 요청 오류: {e}")
         return False
