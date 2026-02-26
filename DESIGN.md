@@ -229,19 +229,20 @@ rion_control_bot.py (CLI 유틸리티)
 - [x] `rion_control_bot.py` → CLI 유틸리티 전환 (폴링/AI 제거)
 - [x] 시작프로그램 등록 (`run_orchestrator_daemon.bat` 자동 재시작)
 
-### Phase 2: Agent 1 구현
+### Phase 2: Agent 1 구현 ✅ 완료
 > **이유**: 현재 Gemini가 하는 분석을 전용 에이전트로 분리
 
-- [ ] `bridge/mt5_reader.py` — rion_data_now.json 파싱
-- [ ] `agents/market_analyst.py` — Haiku 시장 필터
+- [x] `bridge/mt5_reader.py` — rion_data_now.json 파싱 + 신선도 검사(180초)
+- [x] `agents/market_analyst.py` — Haiku 시장 필터 (strength ≥ 55 → pass=True)
 - [ ] AlgoTradingBot의 `trigger_pattern_analysis()` 와 연동
 - [ ] 필터 성능 검증 (False positive 줄이는지 확인)
 
-### Phase 3: Agent 2 구현 (두뇌)
+### Phase 3: Agent 2 구현 (두뇌) ✅ 완료
 > **이유**: 가장 비용이 크므로 1,2단계 검증 후 도입
 
-- [ ] `agents/trade_decision.py` — Opus 4.6 최종 판단
-- [ ] 현재 `analyze_with_gemini()` 대체
+- [x] `agents/trade_decision.py` — Opus 4.6 최종 판단 (confidence ≥ 67 → ENTER)
+- [x] `run_signal.py` — Agent 1→2 파이프라인 진입점 + 일일 Opus 5회 캡
+- [ ] 현재 `analyze_with_gemini()` 대체 (A/B 테스트 선행 필요)
 - [ ] A/B 테스트: Gemini vs Opus 정확도 비교 (2주)
 - [ ] 비용 모니터링 대시보드
 
