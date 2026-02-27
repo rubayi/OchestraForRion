@@ -6,3 +6,8 @@ venv/
 *.log
 signal.json
 params_suggestion.json
+mt5_config_rionbot.json
+pending_params.json
+last_report.json
+.opus_daily_count.json
+.rion_bot.lock
