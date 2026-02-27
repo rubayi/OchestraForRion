@@ -1,8 +1,9 @@
 """
-run_signal.py — Agent 1 + Agent 2 파이프라인 진입점
+run_signal.py — Agent 1 + Agent 2 + Agent 3 파이프라인 진입점
 
 Usage:
     python run_signal.py --input PATH --output PATH [--dry-run]
+    python run_signal.py --input PATH --output PATH [--db PATH] [--params PATH]
 
 출력: signal.json (AlgoTradingBot 연동용)
 비용 가드: 일일 Opus 호출 5회 캡 (.opus_daily_count.json)
@@ -13,6 +14,8 @@ signal.json 형식:
   "symbol": "GBPAUD",
   "agent1": {"pass": true, "context": "...", "strength": 72},
   "agent2": {"decision": "ENTER", "confidence": 78, "reason": "..."},
+  "agent3": {"sl_pips": 13.0, "tp_pips": 26.0, "lot_size": 0.5, "rr_ratio": 2.0,
+             "mode": "normal", "reason": "..."},
   "final_decision": "ENTER"
 }
 """
@@ -37,6 +40,12 @@ except ImportError:
 
 from agents.market_analyst import analyze as agent1_analyze
 from agents.trade_decision import decide as agent2_decide
+from agents.risk_manager import manage as agent3_manage
+
+# ── 기본 경로 (환경변수 또는 하드코딩 fallback) ──────────────────────────────
+_ALGO_DIR      = os.environ.get("ALGOTRADINGBOT_DIR", r"C:\Users\rubay\Documents\projects\AlgoTradingBot")
+DEFAULT_DB     = os.path.join(_ALGO_DIR, "data", "trades.db")
+DEFAULT_PARAMS = os.path.join(_ALGO_DIR, "params.json")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,6 +120,8 @@ def main() -> int:
     )
     parser.add_argument("--input", required=True, help="rion_data_now.json 경로")
     parser.add_argument("--output", required=True, help="signal.json 출력 경로")
+    parser.add_argument("--db", default=DEFAULT_DB, help=f"trades.db 경로 (기본값: {DEFAULT_DB})")
+    parser.add_argument("--params", default=DEFAULT_PARAMS, help=f"params.json 경로 (기본값: {DEFAULT_PARAMS})")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -135,6 +146,7 @@ def main() -> int:
                 "confidence": 0,
                 "reason": "[DRY-RUN] 실제 API 미호출",
             },
+            "agent3": None,
             "final_decision": "SKIP",
             "dry_run": True,
         }
@@ -210,12 +222,38 @@ def main() -> int:
         f"(confidence={agent2_result['confidence']})"
     )
 
+    # ── Agent 3 (Haiku 리스크 계산) — ENTER 결정 시에만 실행 ─────────────────
+    agent3_result = None
+    if final_decision == "ENTER":
+        logger.info(
+            f"--- Agent 3 (Haiku 리스크 계산) 실행 중 "
+            f"[DB={args.db}] [params={args.params}] ---"
+        )
+        try:
+            agent3_result = agent3_manage(
+                agent2_result=agent2_result,
+                json_path=args.input,
+                db_path=args.db,
+                params_path=args.params,
+            )
+            logger.info(
+                f"Agent 3 결과: SL={agent3_result['sl_pips']}p | "
+                f"TP={agent3_result['tp_pips']}p | "
+                f"랏={agent3_result['lot_size']} | "
+                f"RR={agent3_result['rr_ratio']} | "
+                f"모드={agent3_result['mode']}"
+            )
+        except Exception as e:
+            logger.error(f"Agent 3 오류: {e}", exc_info=True)
+            # Agent 3 실패해도 파이프라인 계속 (ENTER 결정은 유지)
+
     # ── signal.json 출력 ────────────────────────────────────────────
     signal = {
         "timestamp": timestamp,
         "symbol": symbol,
         "agent1": agent1_result,
         "agent2": agent2_result,
+        "agent3": agent3_result,
         "final_decision": final_decision,
     }
     _write_signal(signal, args.output)

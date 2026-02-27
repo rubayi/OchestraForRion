@@ -178,7 +178,8 @@ def analyze(report: TradeReport) -> str:
             {
                 "role": "user",
                 "content": (
-                    f"다음 거래 통계를 분석하고 Telegram 리포트를 작성해주세요.\n\n"
+                    f"다음 거래 통계를 분석하고 Telegram 리포트를 작성해주세요.\n"
+                    f"브로커: {getattr(report, 'broker_label', 'ICMarkets')}\n\n"
                     f"{stats_text}"
                 ),
             }
@@ -206,15 +207,18 @@ def analyze(report: TradeReport) -> str:
     return result
 
 
-def send_telegram(message: str) -> bool:
+def send_telegram(message: str, token: str = None, chat_id: str = None) -> bool:
     """
     Telegram으로 메시지 전송
 
+    Args:
+        token: 봇 토큰 (None이면 환경변수 TELEGRAM_BOT_TOKEN 사용)
+        chat_id: 채팅 ID (None이면 환경변수 TELEGRAM_CHAT_ID 사용)
     Returns:
         True if sent successfully, False otherwise
     """
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
         logger.warning("[Agent4] TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 미설정 — 콘솔 출력")
@@ -305,7 +309,9 @@ def analyze_feedback(report: TradeReport, feedback_text: str) -> str:
     return f"💬 AlohaCTO:\n\n{result}"
 
 
-def run(db_path: str, days: int = 30) -> bool:
+def run(db_path: str, days: int = 30,
+        bot_token: str = None, chat_id: str = None,
+        broker_label: str = "ICMarkets") -> bool:
     """
     Agent 4 전체 파이프라인 실행:
     trades.db 읽기 → Haiku 분석 → Telegram 전송
@@ -313,11 +319,14 @@ def run(db_path: str, days: int = 30) -> bool:
     Args:
         db_path: AlgoTradingBot의 data/trades.db 경로
         days: 분석할 최근 일수
+        bot_token: Telegram 봇 토큰 (None이면 환경변수 사용)
+        chat_id: Telegram 채팅 ID (None이면 환경변수 사용)
+        broker_label: 리포트 헤더에 표시할 브로커 이름
 
     Returns:
         True if Telegram sent successfully
     """
-    logger.info(f"[Agent4] 시작 — db={db_path}, 기간={days}일")
+    logger.info(f"[Agent4] 시작 — db={db_path}, 기간={days}일, 브로커={broker_label}")
 
     # 1. DB 읽기
     reader = TradeDBReader(db_path)
@@ -328,13 +337,14 @@ def run(db_path: str, days: int = 30) -> bool:
     )
 
     if report.total_closed == 0:
-        msg = f"📊 [RionAgent] 최근 {days}일 거래 없음 — 리포트 생략"
+        msg = f"📊 [{broker_label}] 최근 {days}일 거래 없음 — 리포트 생략"
         logger.info(msg)
-        send_telegram(msg)
+        send_telegram(msg, token=bot_token, chat_id=chat_id)
         return True
 
-    # 2. Haiku 분석
+    # 2. Haiku 분석 (broker_label을 report에 주입)
+    report.broker_label = broker_label
     analysis = analyze(report)
 
     # 3. Telegram 전송
-    return send_telegram(analysis)
+    return send_telegram(analysis, token=bot_token, chat_id=chat_id)
