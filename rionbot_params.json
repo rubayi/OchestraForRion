@@ -1,0 +1,21 @@
+{
+  "symbol": "GBPAUD",
+  "lot_size": 0.5,
+  "max_lot_size": 1.0,
+  "stop_loss_pips": 13,
+  "take_profit_pips": 26,
+  "target_rr_ratio": 2.0,
+  "min_rr_ratio": 1.5,
+  "sl_buffer_pips": 8,
+  "max_spread_pips": 3.0,
+  "cooldown_minutes": 15,
+  "max_positions": 1,
+  "dynamic_lot_enabled": false,
+  "risk_per_trade_pct": 0.02,
+  "trailing_activation_pips": 10,
+  "trailing_stop_pips": 5,
+  "breakeven_activation_pips": 8,
+  "breakeven_lock_pips": 1.0,
+  "partial_close_trigger_pips": 10,
+  "partial_close_ratio": 0.5
+}
