@@ -87,7 +87,9 @@ JSON_MAX_AGE     = 180             # rion_data_now.json 최대 허용 오래됨 
 OPUS_DAILY_LIMIT = 5               # run_signal.py와 공유
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
-BOT_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+# RIONBOT_TELEGRAM_TOKEN: OchestraRionBot 전용 (@OchestraRionBot)
+# 없으면 공용 TELEGRAM_BOT_TOKEN으로 폴백
+BOT_TOKEN     = os.environ.get("RIONBOT_TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID       = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
